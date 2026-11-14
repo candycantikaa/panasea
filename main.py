@@ -1,6 +1,7 @@
+import asyncio
 import math
 import random
-import asyncio
+import sys
 
 import pygame
 
@@ -8,7 +9,7 @@ import pygame
 # CONFIG & PALETTE
 # ----------------------------------------------------------------------------
 W, H = 1280, 720
-FPS = 60
+FPS = 50  # lebih ramah untuk perangkat mobile; game tetap terasa halus
 GROUND_Y = 630          # garis kaki karakter
 BOARD_LIFT = 33         # tinggi badan karakter saat berdiri di atas skateboard
 
@@ -1397,6 +1398,9 @@ class AnimationManager:
     def __init__(self, screen):
         self.screen = screen
         self.world = pygame.Surface((W, H)).convert()
+        self.shadow_cache = {}
+        self.mobile_mode = sys.platform == "emscripten"
+        self.max_particles = 240 if self.mobile_mode else 420
         self.bg = Background()
         self._build_overlays()
         self.reset()
@@ -1405,9 +1409,11 @@ class AnimationManager:
     def _build_overlays(self):
         rnd = random.Random(3)
         self.grain = []
+        # Kurangi jumlah titik grain di browser/mobile agar waktu render lebih ringan.
+        grain_points = 2400 if sys.platform == "emscripten" else 5200
         for _ in range(5):
             g = pygame.Surface((W, H), pygame.SRCALPHA)
-            for _ in range(5200):
+            for _ in range(grain_points):
                 a = rnd.randint(8, 26)
                 col = (255, 240, 220, a) if rnd.random() < 0.55 else (10, 0, 30, a + 8)
                 g.set_at((rnd.randrange(W), rnd.randrange(H)), col)
@@ -1586,13 +1592,20 @@ class AnimationManager:
             self.particles.append(self._ambient_particle())
         for p in self.particles:
             p.update(dt)
-        self.particles = [p for p in self.particles if p.alive][-420:]
+        self.particles = [p for p in self.particles if p.alive][-self.max_particles:]
 
     # ---------- draw ----------
     def _shadow(self, surf, x, width, alpha):
         if alpha <= 0.02:
             return
-        img = pygame.transform.smoothscale(shadow_sprite(), (int(width), int(width * 0.2)))
+        # Cache hasil scaling bayangan agar tidak dihitung ulang setiap frame.
+        key = int(width)
+        img = self.shadow_cache.get(key)
+        if img is None:
+            img = pygame.transform.smoothscale(
+                shadow_sprite(), (key, max(1, int(key * 0.2)))
+            )
+            self.shadow_cache[key] = img
         img.set_alpha(int(255 * alpha * 0.8))
         surf.blit(img, (x - img.get_width() / 2, GROUND_Y - 4))
 
@@ -1639,6 +1652,27 @@ async def main():
         screen = pygame.display.set_mode((W, H), pygame.SCALED | pygame.RESIZABLE)
     except pygame.error:
         screen = pygame.display.set_mode((W, H))
+
+    # Pygbag menampilkan canvas di browser. Ikuti viewport HP ketika orientasi
+    # diputar dan ketika tinggi address bar browser berubah.
+    if sys.platform == "emscripten":
+        try:
+            import platform
+            canvas = platform.window.canvas
+            body = platform.window.document.body
+            body.style.margin = "0"
+            body.style.padding = "0"
+            body.style.overflow = "hidden"
+            body.style.background = "#0a0d2a"
+            canvas.style.display = "block"
+            canvas.style.width = "100vw"
+            canvas.style.height = "100dvh"
+            canvas.style.objectFit = "contain"
+            canvas.style.touchAction = "none"
+        except Exception:
+            # Fallback: mode SCALED | RESIZABLE tetap digunakan oleh Pygame.
+            pass
+
     pygame.display.set_caption("PANASEA - a little cure, a little comfort")
     clock = pygame.time.Clock()
     am = AnimationManager(screen)
@@ -1658,7 +1692,9 @@ async def main():
         am.update(dt)
         am.draw()
         pygame.display.flip()
+        # Wajib agar event loop browser/Pygbag tetap mendapat giliran.
         await asyncio.sleep(0)
+    pygame.quit()
 
 
 if __name__ == "__main__":
