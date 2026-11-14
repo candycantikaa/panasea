@@ -1,5 +1,16 @@
+"""
+PANASEA - a little cure, a little comfort
+Versi web/HP (pygbag).  File ini HARUS bernama main.py di dalam folder game.
+
+Hosting :  pip install pygbag
+           pygbag --build <folder_game>      -> hasil di <folder_game>/build/web
+           (upload isi build/web ke hosting statis, mis. GitHub Pages / itch.io / Netlify)
+Tes lokal: pygbag <folder_game>              -> buka http://localhost:8000
+Desktop :  python main.py   (ESC keluar, R ulang, F fullscreen)
+"""
 import asyncio
 import math
+import os
 import random
 import sys
 
@@ -8,8 +19,10 @@ import pygame
 # ----------------------------------------------------------------------------
 # CONFIG & PALETTE
 # ----------------------------------------------------------------------------
+WEB = sys.platform == "emscripten"   # True kalau jalan di browser (pygbag)
 W, H = 1280, 720
-FPS = 50  # lebih ramah untuk perangkat mobile; game tetap terasa halus
+FPS = 30 if WEB else 60            # animasi berbasis waktu (dt): 30 fps di HP tetap mulus & hemat baterai
+FONT_FILE = "font.ttf"            # opsional: taruh font .ttf (mis. tulisan tangan) di folder yang sama
 GROUND_Y = 630          # garis kaki karakter
 BOARD_LIFT = 33         # tinggi badan karakter saat berdiri di atas skateboard
 
@@ -26,9 +39,9 @@ HOT_PINK = (255, 150, 178)
 CREAM = (250, 238, 214)
 AMBER = (255, 196, 100)
 AMBER_DEEP = (228, 152, 72)
-OUTLINE = (44, 28, 64)
+OUTLINE = (26, 26, 36)
 SKIN = (255, 225, 204)
-INK = (40, 26, 54)
+INK = (24, 22, 32)
 
 
 # ----------------------------------------------------------------------------
@@ -90,8 +103,8 @@ def get_font(size, bold=False):
     key = (size, bold)
     f = _font_cache.get(key)
     if f is None:
-        path = None
-        for name in FONT_CANDIDATES:
+        path = FONT_FILE if os.path.exists(FONT_FILE) else None
+        for name in (() if path else FONT_CANDIDATES):
             path = pygame.font.match_font(name, bold=bold)
             if path:
                 break
@@ -263,13 +276,44 @@ _shadow_sprite = None
 def shadow_sprite():
     global _shadow_sprite
     if _shadow_sprite is None:
-        _shadow_sprite = pygame.transform.smoothscale(glow_surface(60, (8, 4, 24), 1.0), (240, 44))
+        _shadow_sprite = pygame.transform.smoothscale(glow_surface(60, (0, 0, 0), 1.0), (240, 44))
     return _shadow_sprite
 
 
 # ----------------------------------------------------------------------------
 # PARTICLE
 # ----------------------------------------------------------------------------
+_rot_cache = {}
+
+
+def rotated_sprite(kind, color, size, rot):
+    """Sprite partikel yang sudah diputar/di-scale, di-cache (rotozoom per partikel per frame itu mahal)."""
+    key = (kind, color, max(4, int(size // 3) * 3), int(rot // 15) % 24)
+    img = _rot_cache.get(key)
+    if img is None:
+        img = pygame.transform.rotozoom(make_sprite(kind, color, 64), key[3] * 15, key[2] / 64.0)
+        _rot_cache[key] = img
+    return img
+
+
+GLASS_R = 15
+_lens_sprite = None
+
+
+def glasses_lens_sprite():
+    global _lens_sprite
+    if _lens_sprite is None:
+        n = GLASS_R * 2 + 6
+        s = pygame.Surface((n, n), pygame.SRCALPHA)
+        c = n // 2
+        pygame.draw.circle(s, (205, 225, 255, 46), (c, c), GLASS_R)
+        pygame.draw.arc(s, (255, 255, 255, 170), (c - GLASS_R + 4, c - GLASS_R + 4, GLASS_R * 2 - 8, GLASS_R * 2 - 8),
+                        1.9, 2.9, 2)
+        pygame.draw.circle(s, (255, 255, 255, 150), (c - 6, c - 7), 2)
+        _lens_sprite = s
+    return _lens_sprite
+
+
 class Particle:
     def __init__(self, kind, x, y, vx, vy, life, size, color, gravity=0.0, sway=0.0, spin=0.0,
                  fade_in=0.3, drag=0.0, peak=1.0, grow=0.0, dirx=1):
@@ -320,8 +364,7 @@ class Particle:
             img.set_alpha(int(255 * a))
             surf.blit(img, (self.x - img.get_width() / 2, self.y - img.get_height() / 2))
             return
-        base = make_sprite(self.kind, self.color, 64)
-        img = pygame.transform.rotozoom(base, self.rot, self.size / 64.0)
+        img = rotated_sprite(self.kind, self.color, self.size, self.rot)
         img.set_alpha(int(255 * a))
         surf.blit(img, img.get_rect(center=(self.x, self.y)))
 
@@ -339,23 +382,30 @@ class Background:
         self.city = pygame.Surface((W, H), pygame.SRCALPHA)
         self.bulbs = []
         self._build_city(rnd)
+        # Kota dipisah dua: bagian atas (transparan, tempat bintang & bulan mengintip) dan bagian bawah
+        # yang sudah dilebur ke langit jadi opaque -> blit per frame jauh lebih ringan.
+        self.split = 300
+        self.sky_top = self.sky.subsurface((0, 0, W, self.split)).copy()
+        self.city_top = self.city.subsurface((0, 0, W, self.split)).copy().convert_alpha()
+        bottom = self.sky.subsurface((0, self.split, W, H - self.split)).copy()
+        bottom.blit(self.city, (0, 0), (0, self.split, W, H - self.split))
+        self.city_bottom = bottom.convert()
+        self.city = None
         self.stars = []
-        for _ in range(115):
-            self.stars.append((rnd.uniform(0, W), rnd.uniform(8, 430), rnd.choice((1, 1, 2, 2, 3)),
+        for _ in range(70):
+            self.stars.append((rnd.uniform(0, W), rnd.uniform(8, 270), rnd.choice((1, 1, 2, 2, 3)),
                                rnd.uniform(0, 6.28), rnd.uniform(1.2, 3.4), rnd.random() < 0.28))
         self.star_dots = {r: glow_surface(r * 3 + 2, (255, 244, 220), 0.9) for r in (1, 2, 3)}
         self.star_spark = make_sprite("sparkle", CREAM, 26)
         self.moon = self._build_moon()
-        self.clouds = [(rnd.uniform(0, W), y, sp, self._build_cloud(rnd)) for y, sp in ((130, 7), (250, 4), (60, 5), (340, 6))]
         self.lamp_cone = self._build_cone()
         self.lamp_pool = pygame.transform.smoothscale(glow_surface(120, AMBER, 0.55), (340, 64))
-        self.doodles = self._build_doodles(rnd)
         self.lamp_level = 0.0
 
     # ---------- static builders ----------
     def _build_sky(self):
         sky = pygame.Surface((W, H)).convert()
-        top, mid, low = (9, 12, 42), (32, 24, 78), (112, 66, 120)
+        top, mid, low = (0, 1, 4), (4, 5, 10), (11, 13, 22)
         for y in range(H):
             t = y / 560.0
             c = mix(top, mid, t / 0.6) if t < 0.6 else mix(mid, low, min((t - 0.6) / 0.4, 1.0))
@@ -370,13 +420,6 @@ class Background:
         pygame.draw.circle(s, (255, 252, 236), (60, 60), 44, 2)
         return s
 
-    def _build_cloud(self, rnd):
-        s = pygame.Surface((300, 80), pygame.SRCALPHA)
-        for _ in range(7):
-            w, h = rnd.randint(70, 130), rnd.randint(22, 34)
-            pygame.draw.ellipse(s, (96, 64, 126, 70), (rnd.randint(0, 170), rnd.randint(18, 44), w, h))
-        return s
-
     def _build_cone(self):
         hgt, wid = 280, 340
         s = pygame.Surface((wid, hgt), pygame.SRCALPHA)
@@ -385,43 +428,6 @@ class Background:
             a = int(78 * (1 - i / hgt) ** 1.25)
             pygame.draw.line(s, (255, 214, 130, a), (wid / 2 - half, i), (wid / 2 + half, i))
         return s
-
-    def _doodle_sprite(self, kind, color, size, seed):
-        rnd = random.Random(seed)
-        s = pygame.Surface((size, size), pygame.SRCALPHA)
-        c = size / 2
-        col = (color[0], color[1], color[2], 255)
-
-        def wob(pts):
-            return [(x + rnd.uniform(-1.3, 1.3), y + rnd.uniform(-1.3, 1.3)) for x, y in pts]
-
-        if kind == "heart":
-            pygame.draw.lines(s, col, True, wob(heart_points(c, c, size * 0.8)), 3)
-        elif kind == "star":
-            pygame.draw.lines(s, col, True, wob(star_points(c, c, size * 0.44, size * 0.19)), 3)
-        elif kind == "flower":
-            for i in range(5):
-                a = i * math.tau / 5 - math.pi / 2
-                pygame.draw.circle(s, col, (int(c + math.cos(a) * size * 0.23), int(c + math.sin(a) * size * 0.23)), int(size * 0.15), 3)
-            pygame.draw.circle(s, col, (int(c), int(c)), int(size * 0.09), 3)
-        else:  # moon
-            pygame.draw.circle(s, col, (int(c), int(c)), int(size * 0.36))
-            pygame.draw.circle(s, (0, 0, 0, 0), (int(c + size * 0.16), int(c - size * 0.08)), int(size * 0.32))
-        return s
-
-    def _build_doodles(self, rnd):
-        spots = [(90, 80, "star"), (214, 190, "heart"), (338, 108, "flower"), (470, 60, "moon"), (566, 176, "star"),
-                 (760, 84, "heart"), (904, 176, "flower"), (1010, 52, "star"), (1186, 214, "heart"),
-                 (1170, 60, "flower"), (58, 330, "moon"), (160, 420, "heart"), (1234, 340, "star"),
-                 (1120, 440, "flower"), (640, 230, "sparkle"), (420, 250, "heart"), (850, 250, "star")]
-        cols = (CREAM, PINK_SOFT, AMBER, (214, 190, 250))
-        out = []
-        for i, (x, y, kind) in enumerate(spots):
-            size = rnd.choice((54, 62, 70))
-            if kind == "sparkle":
-                kind = "star"
-            out.append((self._doodle_sprite(kind, cols[i % 4], size, 100 + i), x, y, 2.0 + i * 0.26, rnd.uniform(0, 6)))
-        return out
 
     # ---------- city ----------
     def _windows(self, c, area, rnd, cell, gap, lit, glow, far=False):
@@ -443,11 +449,11 @@ class Background:
                         pygame.draw.line(c, (190, 130, 80), (x + cw // 2, y), (x + cw // 2, y + ch), 2)
                         pygame.draw.line(c, (190, 130, 80), (x, y + ch // 2), (x + cw, y + ch // 2), 2)
                 else:
-                    pygame.draw.rect(c, (20, 18, 54) if far else (30, 24, 66), (x, y, cw, ch), border_radius=3)
+                    pygame.draw.rect(c, (11, 11, 12) if far else (15, 15, 17), (x, y, cw, ch), border_radius=3)
                 x += cw + gx
             y += ch + gy
 
-    def _wire(self, c, p0, p1, sag, col=(18, 14, 38), w=2):
+    def _wire(self, c, p0, p1, sag, col=(9, 9, 10), w=2):
         pts = []
         for i in range(41):
             t = i / 40
@@ -456,16 +462,16 @@ class Background:
         return pts
 
     def _tree(self, c, x, base, s):
-        pygame.draw.rect(c, (40, 28, 62), (x - 7 * s, base - 90 * s, 14 * s, 90 * s), border_radius=4)
-        for dx, dy, r, col in ((0, -120, 62, (28, 48, 88)), (-42, -98, 44, (32, 54, 94)), (44, -100, 46, (30, 52, 92)),
-                               (-14, -150, 40, (38, 64, 106)), (26, -140, 36, (36, 60, 100))):
+        pygame.draw.rect(c, (17, 18, 19), (x - 7 * s, base - 90 * s, 14 * s, 90 * s), border_radius=4)
+        for dx, dy, r, col in ((0, -120, 62, (22, 23, 26)), (-42, -98, 44, (25, 26, 28)), (44, -100, 46, (24, 25, 27)),
+                               (-14, -150, 40, (29, 30, 33)), (26, -140, 36, (27, 29, 31))):
             pygame.draw.circle(c, col, (int(x + dx * s), int(base + dy * s)), int(r * s))
         for dx, dy, r in ((-22, -146, 16), (14, -164, 12), (-50, -112, 12)):
-            pygame.draw.circle(c, (56, 88, 128), (int(x + dx * s), int(base + dy * s)), int(r * s))
+            pygame.draw.circle(c, (40, 41, 46), (int(x + dx * s), int(base + dy * s)), int(r * s))
 
     def _shop(self, c, x, w, kind, sign, awn1, awn2):
         y0 = 438
-        pygame.draw.rect(c, (30, 20, 54), (x + 12, y0, w - 24, 548 - y0))
+        pygame.draw.rect(c, (13, 13, 15), (x + 12, y0, w - 24, 548 - y0))
         win = pygame.Rect(x + 24, y0 + 34, w - 48, 548 - y0 - 40)
         for i in range(win.height):
             pygame.draw.line(c, mix((255, 210, 128), (236, 148, 96), i / win.height), (win.left, win.top + i), (win.right, win.top + i))
@@ -473,18 +479,18 @@ class Background:
             for i in range(5):
                 px = win.left + 22 + i * (win.width - 44) / 4
                 pygame.draw.rect(c, (150, 96, 90), (px - 12, win.bottom - 26, 24, 26), border_radius=4)
-                pygame.draw.circle(c, [HOT_PINK, CREAM, (190, 170, 240), AMBER, PINK_SOFT][i], (int(px), int(win.bottom - 40 - (i % 2) * 14)), 13)
+                pygame.draw.circle(c, [HOT_PINK, CREAM, (240, 214, 190), AMBER, PINK_SOFT][i], (int(px), int(win.bottom - 40 - (i % 2) * 14)), 13)
                 pygame.draw.line(c, (70, 130, 100), (px, win.bottom - 28), (px, win.bottom - 40 - (i % 2) * 14), 3)
             for i in range(3):
                 bx = x + 30 + i * 46
-                pygame.draw.polygon(c, (96, 72, 120), [(bx - 16, 548), (bx + 16, 548), (bx + 12, 520), (bx - 12, 520)])
+                pygame.draw.polygon(c, (41, 42, 46), [(bx - 16, 548), (bx + 16, 548), (bx + 12, 520), (bx - 12, 520)])
                 for k in range(3):
                     pygame.draw.circle(c, [HOT_PINK, AMBER, CREAM][(i + k) % 3], (bx - 10 + k * 10, 508 - (k % 2) * 8), 8)
         elif kind == "cafe":
             for i in range(3):
                 lx = win.left + 40 + i * (win.width - 80) / 2
-                pygame.draw.line(c, (60, 36, 70), (lx, win.top), (lx, win.top + 26), 2)
-                pygame.draw.polygon(c, (60, 36, 70), [(lx - 14, win.top + 38), (lx + 14, win.top + 38), (lx + 6, win.top + 24), (lx - 6, win.top + 24)])
+                pygame.draw.line(c, (23, 23, 26), (lx, win.top), (lx, win.top + 26), 2)
+                pygame.draw.polygon(c, (23, 23, 26), [(lx - 14, win.top + 38), (lx + 14, win.top + 38), (lx + 6, win.top + 24), (lx - 6, win.top + 24)])
                 c.blit(glow_surface(26, (255, 236, 170), 0.8), (lx - 26, win.top + 14))
             pygame.draw.rect(c, (120, 76, 80), (win.left + 10, win.bottom - 34, win.width - 20, 10), border_radius=4)
             for i in range(4):
@@ -492,10 +498,10 @@ class Background:
                 pygame.draw.rect(c, CREAM, (cx - 9, win.bottom - 52, 18, 16), border_radius=4)
         else:  # records
             for r in range(3):
-                pygame.draw.rect(c, (96, 60, 100), (win.left + 8, win.top + 16 + r * 34, win.width - 16, 5))
+                pygame.draw.rect(c, (36, 38, 41), (win.left + 8, win.top + 16 + r * 34, win.width - 16, 5))
                 for i in range(6):
-                    pygame.draw.rect(c, [DUSTY_PINK, CREAM, (150, 130, 220), AMBER][(i + r) % 4], (win.left + 14 + i * (win.width - 40) / 6, win.top - 6 + r * 34 + 4, 12, 22))
-            pygame.draw.circle(c, (30, 22, 50), (win.right - 36, win.bottom - 30), 22)
+                    pygame.draw.rect(c, [DUSTY_PINK, CREAM, (172, 140, 112), AMBER][(i + r) % 4], (win.left + 14 + i * (win.width - 40) / 6, win.top - 6 + r * 34 + 4, 12, 22))
+            pygame.draw.circle(c, (13, 14, 15), (win.right - 36, win.bottom - 30), 22)
             pygame.draw.circle(c, DUSTY_PINK, (win.right - 36, win.bottom - 30), 7)
         pygame.draw.rect(c, OUTLINE, win, 4, border_radius=3)
         # awning
@@ -509,7 +515,7 @@ class Background:
         pygame.draw.line(c, OUTLINE, (x + 8, y0 - 2), (x + w - 8, y0 - 2), 4)
         # sign board
         board = pygame.Rect(x + w // 2 - 70, y0 - 40, 140, 34)
-        pygame.draw.rect(c, (58, 34, 84), board, border_radius=8)
+        pygame.draw.rect(c, (22, 23, 26), board, border_radius=8)
         pygame.draw.rect(c, DUSTY_PINK, board, 3, border_radius=8)
         txt = get_font(24, True).render(sign, True, CREAM)
         c.blit(txt, txt.get_rect(center=board.center))
@@ -521,35 +527,35 @@ class Background:
         while x < W:
             w, h = rnd.randint(70, 130), rnd.randint(190, 340)
             top = 560 - h
-            col = mix((28, 28, 78), (48, 34, 94), rnd.random() * 0.5)
+            col = mix((16, 17, 18), (22, 22, 25), rnd.random() * 0.5)
             pygame.draw.rect(c, col, (x, top, w, h))
             if rnd.random() < 0.35:
                 pygame.draw.line(c, col, (x + w // 2, top), (x + w // 2, top - rnd.randint(14, 40)), 3)
-            self._windows(c, pygame.Rect(x + 8, top + 10, w - 16, h - 40), rnd, (14, 20), (8, 12), 0.28, False, True)
+            self._windows(c, pygame.Rect(x + 8, top + 10, w - 16, h - 40), rnd, (14, 20), (8, 12), 0.16, False, True)
             x += w + rnd.randint(-4, 8)
         haze = pygame.Surface((W, 160), pygame.SRCALPHA)
         for i in range(160):
-            pygame.draw.line(haze, (150, 92, 140, int(70 * (i / 160) ** 1.4)), (0, i), (W, i))
+            pygame.draw.line(haze, (74, 80, 98, int(26 * (i / 160) ** 1.4)), (0, i), (W, i))
         c.blit(haze, (0, 420))
 
         # near buildings
-        near = [(-10, 262, 250, (62, 42, 104), ("FLORIST", "florist", DUSTY_PINK, CREAM)),
-                (252, 236, 312, (46, 36, 92), None),
-                (488, 300, 232, (68, 46, 108), ("CAFE", "cafe", AMBER_DEEP, CREAM)),
-                (788, 236, 324, (48, 38, 94), None),
-                (1024, 270, 262, (64, 44, 102), ("RECORDS", "records", (126, 104, 206), CREAM))]
+        near = [(-10, 262, 250, (26, 27, 30), ("FLORIST", "florist", DUSTY_PINK, CREAM)),
+                (252, 236, 312, (22, 23, 25), None),
+                (488, 300, 232, (29, 30, 33), ("CAFE", "cafe", AMBER_DEEP, CREAM)),
+                (788, 236, 324, (23, 24, 26), None),
+                (1024, 270, 262, (27, 28, 31), ("RECORDS", "records", (176, 128, 92), CREAM))]
         for x, w, top, col, shop in near:
             pygame.draw.rect(c, col, (x, top, w, 548 - top))
             pygame.draw.rect(c, mix(col, (255, 255, 255), 0.1), (x - 4, top - 8, w + 8, 12), border_radius=3)
             wy_end = 424 if shop else 440
-            self._windows(c, pygame.Rect(x + 20, top + 26, w - 40, wy_end - top - 30), rnd, (30, 40), (18, 18), 0.5, True)
+            self._windows(c, pygame.Rect(x + 20, top + 26, w - 40, wy_end - top - 30), rnd, (30, 40), (18, 18), 0.34, True)
             if shop:
                 self._shop(c, x, w, shop[1], shop[0], shop[2], shop[3])
             else:
-                pygame.draw.rect(c, (30, 22, 56), (x + w // 2 - 24, 468, 48, 80), border_radius=6)
+                pygame.draw.rect(c, (14, 14, 15), (x + w // 2 - 24, 468, 48, 80), border_radius=6)
                 pygame.draw.rect(c, (255, 206, 128), (x + w // 2 - 15, 478, 30, 34), border_radius=4)
                 for dx in (-86, 44):
-                    pygame.draw.rect(c, (255, 200, 120) if rnd.random() < 0.7 else (30, 24, 66), (x + w // 2 + dx, 474, 42, 40), border_radius=4)
+                    pygame.draw.rect(c, (255, 200, 120) if rnd.random() < 0.7 else (15, 15, 17), (x + w // 2 + dx, 474, 42, 40), border_radius=4)
                     pygame.draw.rect(c, OUTLINE, (x + w // 2 + dx, 474, 42, 40), 3, border_radius=4)
                 c.blit(glow_surface(40, AMBER, 0.55), (x + w // 2 - 40, 450))
 
@@ -559,32 +565,32 @@ class Background:
 
         # sidewalk, curb, road
         for i in range(102):
-            pygame.draw.line(c, mix((78, 60, 116), (52, 40, 90), i / 102), (0, 548 + i), (W, 548 + i))
+            pygame.draw.line(c, mix((34, 36, 39), (24, 25, 27), i / 102), (0, 548 + i), (W, 548 + i))
         for i in range(-2, 18):
             px = i * 96
-            pygame.draw.line(c, (96, 78, 136), (px, 548), (px + (px - 640) * 0.28, 650), 2)
-        pygame.draw.line(c, (96, 78, 136), (0, 596), (W, 596), 2)
-        pygame.draw.rect(c, (124, 100, 164), (0, 650, W, 8))
-        pygame.draw.rect(c, (28, 22, 54), (0, 658, W, 62))
+            pygame.draw.line(c, (43, 45, 49), (px, 548), (px + (px - 640) * 0.28, 650), 2)
+        pygame.draw.line(c, (43, 45, 49), (0, 596), (W, 596), 2)
+        pygame.draw.rect(c, (55, 57, 63), (0, 650, W, 8))
+        pygame.draw.rect(c, (13, 14, 15), (0, 658, W, 62))
         for i in range(0, W, 130):
-            pygame.draw.rect(c, (120, 104, 150), (i + 20, 692, 70, 6), border_radius=3)
+            pygame.draw.rect(c, (55, 57, 63), (i + 20, 692, 70, 6), border_radius=3)
 
         # street furniture: bench, mailbox, bin
-        pygame.draw.rect(c, (46, 34, 76), (84, 562, 112, 10), border_radius=3)
-        pygame.draw.rect(c, (46, 34, 76), (84, 530, 112, 8), border_radius=3)
-        pygame.draw.rect(c, (46, 34, 76), (90, 538, 6, 26))
-        pygame.draw.rect(c, (46, 34, 76), (184, 538, 6, 26))
-        pygame.draw.rect(c, (46, 34, 76), (92, 572, 6, 30))
-        pygame.draw.rect(c, (46, 34, 76), (182, 572, 6, 30))
+        pygame.draw.rect(c, (20, 21, 23), (84, 562, 112, 10), border_radius=3)
+        pygame.draw.rect(c, (20, 21, 23), (84, 530, 112, 8), border_radius=3)
+        pygame.draw.rect(c, (20, 21, 23), (90, 538, 6, 26))
+        pygame.draw.rect(c, (20, 21, 23), (184, 538, 6, 26))
+        pygame.draw.rect(c, (20, 21, 23), (92, 572, 6, 30))
+        pygame.draw.rect(c, (20, 21, 23), (182, 572, 6, 30))
         pygame.draw.rect(c, (150, 80, 110), (440, 508, 34, 40), border_radius=10)
-        pygame.draw.rect(c, (60, 40, 80), (454, 548, 6, 26))
-        pygame.draw.rect(c, (60, 44, 90), (880, 524, 28, 40), border_radius=5)
-        pygame.draw.rect(c, (80, 62, 112), (876, 518, 36, 8), border_radius=3)
+        pygame.draw.rect(c, (24, 25, 28), (454, 548, 6, 26))
+        pygame.draw.rect(c, (26, 27, 30), (880, 524, 28, 40), border_radius=5)
+        pygame.draw.rect(c, (35, 36, 40), (876, 518, 36, 8), border_radius=3)
 
         # power poles + wires + birds
         for px in (150, 1150):
-            pygame.draw.rect(c, (36, 26, 60), (px - 5, 150, 10, 412), border_radius=3)
-            pygame.draw.rect(c, (36, 26, 60), (px - 26, 158, 52, 7), border_radius=3)
+            pygame.draw.rect(c, (16, 16, 18), (px - 5, 150, 10, 412), border_radius=3)
+            pygame.draw.rect(c, (16, 16, 18), (px - 26, 158, 52, 7), border_radius=3)
         pts = []
         for k in range(3):
             self._wire(c, (-20, 204 + k * 14), (134 + k * 16, 162), 18)
@@ -592,27 +598,27 @@ class Background:
             self._wire(c, (1134 + k * 16, 162), (1300, 204 + k * 14), 18)
         for bi in (13, 14, 26):
             bx, by = pts[bi]
-            pygame.draw.ellipse(c, (22, 18, 46), (bx - 7, by - 12, 15, 10))
-            pygame.draw.circle(c, (22, 18, 46), (int(bx + 7), int(by - 11)), 4)
-            pygame.draw.polygon(c, (22, 18, 46), [(bx - 6, by - 8), (bx - 14, by - 4), (bx - 5, by - 5)])
+            pygame.draw.ellipse(c, (11, 11, 12), (bx - 7, by - 12, 15, 10))
+            pygame.draw.circle(c, (11, 11, 12), (int(bx + 7), int(by - 11)), 4)
+            pygame.draw.polygon(c, (11, 11, 12), [(bx - 6, by - 8), (bx - 14, by - 4), (bx - 5, by - 5)])
 
         # lamp posts + string lights
         for lx, s in self.LAMPS:
-            pygame.draw.rect(c, (40, 30, 70), (lx - 5, 336, 10, 224), border_radius=3)
-            pygame.draw.rect(c, (56, 44, 90), (lx - 11, 548, 22, 14), border_radius=3)
-            pygame.draw.lines(c, (40, 30, 70), False, [(lx, 342), (lx, 328), (lx + s * 16, 320), (lx + s * 34, 322)], 6)
+            pygame.draw.rect(c, (18, 19, 21), (lx - 5, 336, 10, 224), border_radius=3)
+            pygame.draw.rect(c, (25, 26, 29), (lx - 11, 548, 22, 14), border_radius=3)
+            pygame.draw.lines(c, (18, 19, 21), False, [(lx, 342), (lx, 328), (lx + s * 16, 320), (lx + s * 34, 322)], 6)
             hx = lx + s * 34
-            pygame.draw.polygon(c, (50, 38, 84), [(hx - 17, 322), (hx + 17, 322), (hx + 11, 335), (hx - 11, 335)])
+            pygame.draw.polygon(c, (22, 23, 26), [(hx - 17, 322), (hx + 17, 322), (hx + 11, 335), (hx - 11, 335)])
         a, b = (self.LAMPS[0][0], 340), (self.LAMPS[1][0], 340)
-        pts = self._wire(c, a, b, 64, (24, 18, 44), 2)
-        cols = (AMBER, HOT_PINK, CREAM, (190, 170, 240))
+        pts = self._wire(c, a, b, 64, (11, 11, 12), 2)
+        cols = (AMBER, CREAM, AMBER_DEEP, (255, 226, 170))
         for i in range(1, 17):
             bx, by = pts[int(i / 17 * 40)]
             self.bulbs.append((bx, by + 6, cols[i % 4], rnd.uniform(0, 6.28)))
 
     # ---------- dynamic ----------
     def draw(self, surf, t):
-        surf.blit(self.sky, (0, 0))
+        surf.blit(self.sky_top, (0, 0))
         sl = smooth(prog(t, 0.0, 3.0))
         for x, y, r, ph, sp, spark in self.stars:
             tw = 0.5 + 0.5 * math.sin(t * sp + ph)
@@ -625,14 +631,13 @@ class Background:
         ml = smooth(prog(t, 0.3, 2.8))
         if ml > 0.01:
             mx, my = self.MOON
-            halo = glow_surface(150, (255, 226, 190), 0.5)
+            halo = glow_surface(150, (205, 215, 235), 0.26)
             halo.set_alpha(int(255 * ml * (0.8 + 0.2 * math.sin(t * 1.2))))
             surf.blit(halo, (mx - 150, my - 150))
             self.moon.set_alpha(int(255 * ml))
             surf.blit(self.moon, (mx - 60, my - 60))
-        for x0, y, sp, img in self.clouds:
-            surf.blit(img, (((x0 + t * sp) % (W + 500)) - 330, y))
-        surf.blit(self.city, (0, 0))
+        surf.blit(self.city_top, (0, 0))
+        surf.blit(self.city_bottom, (0, self.split))
 
         # lamp turn-on with flicker
         lt = prog(t, 1.0, 2.8)
@@ -661,17 +666,11 @@ class Background:
                 surf.blit(g, (bx - 15, by - 15))
                 pygame.draw.circle(surf, mix(col, (255, 255, 255), 0.5), (int(bx), int(by)), 3)
 
-        for img, x, y, t0, ph in self.doodles:
-            a = smooth(prog(t, t0, t0 + 1.6))
-            if a <= 0.01:
-                continue
-            img.set_alpha(int(215 * a))
-            surf.blit(img, (x - img.get_width() / 2, y - img.get_height() / 2 + math.sin(t * 1.1 + ph) * 5 + (1 - a) * 12))
         self._draw_cat(surf, t)
 
     def _draw_cat(self, surf, t):
         x, y = 1212, 612
-        col = (26, 20, 48)
+        col = (12, 12, 14)
         pts = []
         for i in range(9):
             k = i / 8
@@ -688,8 +687,8 @@ class Background:
                 pygame.draw.line(surf, AMBER, (x + ex - 3, y - 58), (x + ex + 3, y - 58), 2)
             else:
                 pygame.draw.circle(surf, AMBER, (x + ex, y - 58), 3)
-        pygame.draw.ellipse(surf, (40, 32, 66), (x - 12, y - 8, 10, 8))
-        pygame.draw.ellipse(surf, (40, 32, 66), (x + 2, y - 8, 10, 8))
+        pygame.draw.ellipse(surf, (18, 19, 21), (x - 12, y - 8, 10, 8))
+        pygame.draw.ellipse(surf, (18, 19, 21), (x + 2, y - 8, 10, 8))
 
 
 # ----------------------------------------------------------------------------
@@ -746,7 +745,7 @@ class Skateboard:
 # CHARACTER
 # ----------------------------------------------------------------------------
 GIRL_PAL = dict(top=(214, 150, 172), top_dark=(174, 108, 136), pants=(238, 226, 204), pants_dark=(190, 178, 160),
-                shoe=CREAM, accent=(214, 120, 150), hair=(62, 38, 74), hair_hi=(108, 72, 124))
+                shoe=CREAM, accent=(214, 120, 150), hair=(22, 21, 28), hair_hi=(96, 98, 116))
 BOY_PAL = dict(top=(232, 166, 86), top_dark=(194, 124, 58), tee=CREAM, pants=(112, 122, 188), pants_dark=(80, 88, 146),
                shoe=CREAM, accent=(228, 152, 72), hair=(92, 60, 50), cap=(40, 48, 112), cap_dark=(26, 32, 84))
 
@@ -935,6 +934,21 @@ class Character:
             pygame.draw.circle(surf, (240, 120, 140), (int(mx + 1), int(my + ry - 6)), 4)
             pygame.draw.polygon(surf, INK, pts, 2)
 
+    def _draw_glasses(self, surf, fx, ey):
+        """Kacamata bulat tipis: ikut menoleh bersama wajah."""
+        sep = 20 * (1 - 0.18 * self.turn)
+        lens = glasses_lens_sprite()
+        r = GLASS_R
+        frame = (30, 28, 40)
+        o = lens.get_width() // 2
+        for sgn in (-1, 1):
+            ex = fx + sgn * sep
+            surf.blit(lens, (ex - o, ey - o))
+            pygame.draw.circle(surf, frame, (int(ex), int(ey)), r, 3)
+            pygame.draw.line(surf, frame, (ex + sgn * (r - 1), ey - 4), (ex + sgn * (r + 10), ey - 6), 3)
+        if sep - r > 1:
+            pygame.draw.line(surf, frame, (fx - sep + r - 1, ey - 3), (fx + sep - r + 1, ey - 3), 3)
+
     def _draw_head(self, surf, by):
         d, p, t = self.dir, self.p, self.turn
         hx = self.x + self.head_dx
@@ -943,10 +957,11 @@ class Character:
         ey = hy + 8
         flow = -self.lean * 12 + math.sin(self.t * 7) * self.speed * 3
         if self.is_girl:
-            R = 62
+            R = 66      # bob: rambut tebal, ujung tumpul sebatas rahang
             pts = [(hx + math.cos(math.pi + i * math.pi / 16) * R, hy - 4 + math.sin(math.pi + i * math.pi / 16) * (R + 2)) for i in range(17)]
-            pts += [(hx + R + 3 + flow * 0.6, hy + 30), (hx + R - 2 + flow, hy + 56), (hx + 30 + flow, hy + 61),
-                    (hx + flow, hy + 58), (hx - 30 + flow, hy + 61), (hx - R + 2 + flow, hy + 56), (hx - R - 3 + flow * 0.6, hy + 30)]
+            pts += [(hx + R + 3 + flow * 0.5, hy + 22), (hx + R + 2 + flow * 0.8, hy + 46), (hx + R - 4 + flow, hy + 60),
+                    (hx + R - 18 + flow, hy + 65), (hx - R + 18 + flow, hy + 65), (hx - R + 4 + flow, hy + 60),
+                    (hx - R - 2 + flow * 0.8, hy + 46), (hx - R - 3 + flow * 0.5, hy + 22)]
             pygame.draw.polygon(surf, p["hair"], pts)
             pygame.draw.polygon(surf, OUTLINE, pts, 3)
         else:
@@ -969,18 +984,21 @@ class Character:
         if self.is_girl:
             # rambut depan: poni + sisi
             for sgn in (-1, 1):
-                lock = [(hx + sgn * 63, hy - 8), (hx + sgn * 42, hy - 16), (hx + sgn * 45, hy + 22 + flow * 0.2),
-                        (hx + sgn * 55 + flow * 0.5, hy + 54), (hx + sgn * 63 + flow * 0.6, hy + 30)]
+                lock = [(hx + sgn * 67, hy - 8), (hx + sgn * 46, hy - 16), (hx + sgn * 49, hy + 20 + flow * 0.2),
+                        (hx + sgn * 52 + flow * 0.4, hy + 50), (hx + sgn * 60 + flow * 0.5, hy + 57),
+                        (hx + sgn * 67 + flow * 0.6, hy + 44)]
                 pygame.draw.polygon(surf, p["hair"], lock)
                 pygame.draw.polygon(surf, OUTLINE, lock, 3)
-            R = 60
+            R = 62
             bangs = [(hx + math.cos(math.pi + i * math.pi / 16) * R, hy + math.sin(math.pi + i * math.pi / 16) * (R + 4) - 2) for i in range(17)]
-            bangs += [(hx + R, hy + 4), (hx + 38, hy - 22), (hx + 24, hy - 12), (hx + 8, hy - 26), (hx - 10, hy - 14),
-                      (hx - 26, hy - 26), (hx - 42, hy - 12), (hx - R, hy + 4)]
+            # poni lurus (blunt fringe)
+            bangs += [(hx + R, hy + 2), (hx + 46, hy - 12), (hx + 24, hy - 19), (hx, hy - 21),
+                      (hx - 24, hy - 19), (hx - 46, hy - 12), (hx - R, hy + 2)]
             pygame.draw.polygon(surf, p["hair"], bangs)
             pygame.draw.polygon(surf, OUTLINE, bangs, 3)
             pygame.draw.arc(surf, p["hair_hi"], (hx - 44, hy - 62, 88, 50), 0.7, 2.3, 4)
             surf.blit(make_sprite("star", AMBER, 24), (hx - d * 38 - 12, hy - 42))
+            self._draw_glasses(surf, fx, ey)
         else:
             cy = hy - 18
             crown = [(hx + math.cos(math.pi + i * math.pi / 16) * 61, cy + math.sin(math.pi + i * math.pi / 16) * 62) for i in range(17)]
@@ -1008,7 +1026,7 @@ def build_bouquet_sprite():
         pygame.draw.line(s, dgreen, base, (tx, ty + 10), 4)
     pygame.draw.ellipse(s, green, (16, 96, 34, 15))
     pygame.draw.ellipse(s, green, (100, 96, 34, 15))
-    cols = [HOT_PINK, AMBER, CREAM, (190, 170, 240), PINK_SOFT]
+    cols = [HOT_PINK, AMBER, CREAM, (240, 214, 190), PINK_SOFT]
     for (tx, ty), col in zip(tips, cols):
         for i in range(5):
             a = i * math.tau / 5 - math.pi / 2
@@ -1111,6 +1129,10 @@ class SpeechBubble:
 
     def draw(self, surf):
         if self.state == "hidden":
+            return
+        if self.state == "shown":      # sudah diam: cukup blit langsung (tanpa scaling)
+            bob = math.sin(self.age * 2.0) * 3
+            surf.blit(self.surf, (self.anchor[0] - self.tip[0], self.anchor[1] - self.tip[1] + bob))
             return
         wob = 0.0
         if self.state == "in":
@@ -1399,7 +1421,7 @@ class AnimationManager:
         self.screen = screen
         self.world = pygame.Surface((W, H)).convert()
         self.shadow_cache = {}
-        self.mobile_mode = sys.platform == "emscripten"
+        self.mobile_mode = WEB
         self.max_particles = 240 if self.mobile_mode else 420
         self.bg = Background()
         self._build_overlays()
@@ -1407,24 +1429,6 @@ class AnimationManager:
 
     # ---------- setup ----------
     def _build_overlays(self):
-        rnd = random.Random(3)
-        self.grain = []
-        # Kurangi jumlah titik grain di browser/mobile agar waktu render lebih ringan.
-        grain_points = 2400 if sys.platform == "emscripten" else 5200
-        for _ in range(5):
-            g = pygame.Surface((W, H), pygame.SRCALPHA)
-            for _ in range(grain_points):
-                a = rnd.randint(8, 26)
-                col = (255, 240, 220, a) if rnd.random() < 0.55 else (10, 0, 30, a + 8)
-                g.set_at((rnd.randrange(W), rnd.randrange(H)), col)
-            self.grain.append(g)
-        small = pygame.Surface((64, 36), pygame.SRCALPHA)
-        for yy in range(36):
-            for xx in range(64):
-                dx, dy = (xx + 0.5) / 64 - 0.5, (yy + 0.5) / 36 - 0.5
-                d = math.sqrt(dx * dx + (dy * 1.25) ** 2) * 2
-                small.set_at((xx, yy), (8, 4, 28, int(255 * clamp((d - 0.55) / 0.75) ** 1.7 * 0.62)))
-        self.vignette = pygame.transform.smoothscale(small, (W, H))
         self.black = pygame.Surface((W, H))
         self.black.fill((0, 0, 0))
 
@@ -1478,7 +1482,7 @@ class AnimationManager:
         self.girl_bubble = SpeechBubble("I will do the same for you.", 340, 0.38)
         self.scenes = [OpeningScene(self), EntranceScene(self), BoyDialogueScene(self),
                        GirlResponseScene(self), SweetMomentScene(self), EndingScene(self)]
-        for _ in range(45):
+        for _ in range(18):
             p = self._ambient_particle()
             p.age = random.uniform(0, p.life * 0.8)
             self.particles.append(p)
@@ -1495,7 +1499,7 @@ class AnimationManager:
                         sway=10, fade_in=1.0, peak=0.55 if kind == "glow" else 0.9)
 
     def burst(self, x, y, n=8, spread=70, kinds=("heart", "flower", "star", "sparkle")):
-        palette = {"heart": (HOT_PINK, DUSTY_PINK, PINK_SOFT), "flower": (PINK_SOFT, CREAM, AMBER, (200, 180, 240)),
+        palette = {"heart": (HOT_PINK, DUSTY_PINK, PINK_SOFT), "flower": (PINK_SOFT, CREAM, AMBER, (246, 226, 200)),
                    "star": ((255, 226, 140),), "sparkle": (CREAM,)}
         for _ in range(n):
             kind = random.choice(kinds)
@@ -1508,7 +1512,7 @@ class AnimationManager:
 
     def float_fx(self, cx, cy, spread_x, rate, dt, kinds=("heart", "heart", "flower", "star", "sparkle")):
         self._fx_acc += dt * rate
-        palette = {"heart": (HOT_PINK, DUSTY_PINK, PINK_SOFT), "flower": (PINK_SOFT, CREAM, AMBER, (200, 180, 240)),
+        palette = {"heart": (HOT_PINK, DUSTY_PINK, PINK_SOFT), "flower": (PINK_SOFT, CREAM, AMBER, (246, 226, 200)),
                    "star": ((255, 226, 140),), "sparkle": (CREAM,)}
         while self._fx_acc >= 1.0:
             self._fx_acc -= 1.0
@@ -1586,7 +1590,7 @@ class AnimationManager:
             bub.anchor = (ch.x + ch.dir * -4 + 6, ch.head_top() - 16)
             bub.update(dt)
 
-        self._amb_acc += dt * 6
+        self._amb_acc += dt * 2.5
         while self._amb_acc >= 1.0:
             self._amb_acc -= 1.0
             self.particles.append(self._ambient_particle())
@@ -1631,13 +1635,18 @@ class AnimationManager:
         if z <= 1.0005:
             self.screen.blit(w, (0, 0))
         else:
-            sw, sh = int(W * z), int(H * z)
-            img = pygame.transform.smoothscale(w, (sw, sh))
-            self.screen.blit(img, (int(clamp(W / 2 - cx * z, W - sw, 0)), int(clamp(H / 2 - cy * z, H - sh, 0))))
+            # zoom kamera = crop area yang terlihat lalu scale langsung ke layar (lebih murah daripada
+            # men-scale seluruh dunia ke ukuran lebih besar lalu memotongnya)
+            vw, vh = int(W / z), int(H / z)
+            vx = int(clamp(cx - vw / 2, 0, W - vw))
+            vy = int(clamp(cy - vh / 2, 0, H - vh))
+            view = w.subsurface((vx, vy, vw, vh))
+            if WEB:
+                pygame.transform.scale(view, (W, H), self.screen)
+            else:
+                pygame.transform.smoothscale(view, (W, H), self.screen)
 
         self.scenes[self.idx].draw_overlay(self.screen, self.lt)
-        self.screen.blit(self.grain[int(self.t * 18) % len(self.grain)], (0, 0))
-        self.screen.blit(self.vignette, (0, 0))
         if self.fade > 1:
             self.black.set_alpha(int(self.fade))
             self.screen.blit(self.black, (0, 0))
@@ -1646,36 +1655,71 @@ class AnimationManager:
 # ----------------------------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------------------------
+def setup_web_canvas():
+    """Canvas selalu 16:9 utuh di tengah layar (tanpa gepeng); sisanya hitam = menyatu dengan langit malam."""
+    try:
+        import platform
+        doc = platform.window.document
+        meta = doc.querySelector('meta[name="viewport"]')
+        if meta is None:
+            meta = doc.createElement("meta")
+            meta.setAttribute("name", "viewport")
+            doc.head.appendChild(meta)
+        meta.setAttribute("content", "width=device-width, initial-scale=1, maximum-scale=1, "
+                                     "user-scalable=no, viewport-fit=cover")
+        css = doc.createElement("style")
+        css.innerHTML = (
+            "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000;"
+            "overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none}"
+            "canvas{position:fixed!important;left:50%!important;top:50%!important;margin:0!important;"
+            "border:0!important;display:block!important;transform:translate(-50%,-50%)!important;"
+            "touch-action:none!important;"
+            "width:min(100vw,calc(100vh*16/9))!important;height:min(100vh,calc(100vw*9/16))!important}"
+            "@supports (height:100dvh){canvas{"
+            "width:min(100vw,calc(100dvh*16/9))!important;height:min(100dvh,calc(100vw*9/16))!important}}"
+        )
+        doc.head.appendChild(css)
+    except Exception:
+        pass
+
+
+def web_fullscreen():
+    """Browser hanya mengizinkan fullscreen dari sentuhan/klik pengguna, jadi dipanggil saat tap pertama."""
+    try:
+        import platform
+        platform.window.document.documentElement.requestFullscreen()
+    except Exception:
+        return
+    try:
+        platform.window.screen.orientation.lock("landscape")   # Android Chrome; iOS mengabaikan
+    except Exception:
+        pass
+
+
 async def main():
     pygame.init()
+    flags = 0 if WEB else (pygame.SCALED | pygame.RESIZABLE)
     try:
-        screen = pygame.display.set_mode((W, H), pygame.SCALED | pygame.RESIZABLE)
+        screen = pygame.display.set_mode((W, H), flags)
     except pygame.error:
         screen = pygame.display.set_mode((W, H))
-
-    # Pygbag menampilkan canvas di browser. Ikuti viewport HP ketika orientasi
-    # diputar dan ketika tinggi address bar browser berubah.
-    if sys.platform == "emscripten":
-        try:
-            import platform
-            canvas = platform.window.canvas
-            body = platform.window.document.body
-            body.style.margin = "0"
-            body.style.padding = "0"
-            body.style.overflow = "hidden"
-            body.style.background = "#0a0d2a"
-            canvas.style.display = "block"
-            canvas.style.width = "100vw"
-            canvas.style.height = "100dvh"
-            canvas.style.objectFit = "contain"
-            canvas.style.touchAction = "none"
-        except Exception:
-            # Fallback: mode SCALED | RESIZABLE tetap digunakan oleh Pygame.
-            pass
-
+    if WEB:
+        setup_web_canvas()
     pygame.display.set_caption("PANASEA - a little cure, a little comfort")
+
+    # Layar loading: pembuatan aset butuh beberapa detik, jangan biarkan HP menampilkan layar kosong.
+    screen.fill((0, 0, 0))
+    t1 = get_font(48, True).render("PANASEA", True, CREAM)
+    t2 = get_font(26).render("loading...", True, (140, 136, 130))
+    screen.blit(t1, t1.get_rect(center=(W // 2, H // 2 - 14)))
+    screen.blit(t2, t2.get_rect(center=(W // 2, H // 2 + 36)))
+    pygame.display.flip()
+    await asyncio.sleep(0.1)
+
     clock = pygame.time.Clock()
     am = AnimationManager(screen)
+    taps = (pygame.MOUSEBUTTONDOWN, pygame.FINGERDOWN)
+    asked_fs = False
     running = True
     while running:
         dt = min(clock.tick(FPS) / 1000.0, 1 / 20)
@@ -1683,17 +1727,22 @@ async def main():
             if e.type == pygame.QUIT:
                 running = False
             elif e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_ESCAPE:
+                if e.key == pygame.K_ESCAPE and not WEB:
                     running = False
                 elif e.key == pygame.K_r:
                     am.reset()
                 elif e.key == pygame.K_f:
-                    pygame.display.toggle_fullscreen()
+                    web_fullscreen() if WEB else pygame.display.toggle_fullscreen()
+            elif WEB and e.type in taps:
+                if not asked_fs:
+                    asked_fs = True
+                    web_fullscreen()
+                elif am.idx == len(am.scenes) - 1 and am.lt > 7:    # tap setelah ending = ulang
+                    am.reset()
         am.update(dt)
         am.draw()
         pygame.display.flip()
-        # Wajib agar event loop browser/Pygbag tetap mendapat giliran.
-        await asyncio.sleep(0)
+        await asyncio.sleep(0)      # wajib: beri giliran ke event loop browser
     pygame.quit()
 
 
